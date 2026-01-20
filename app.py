@@ -178,7 +178,7 @@ class ProfessionalDocumentMerger:
         options: Dict
     ) -> Tuple[bytes, Dict]:
         """
-        Combina múltiples documentos usando docxcompose (método profesional)
+        Combina múltiples documentos: Documento 1 completo, siguiente página, Documento 2 completo, etc.
         
         Args:
             documents: Lista de DocumentInfo ordenados
@@ -195,76 +195,98 @@ class ProfessionalDocumentMerger:
         self.stats['total_docs'] = len(documents)
         
         try:
-            # Cargar el primer documento como base
-            self._update_progress(0, len(documents), "Cargando documento base...")
+            # Cargar TODOS los documentos primero para verificar que estén bien
+            loaded_docs = []
             
-            first_doc_info = documents[0]
-            if first_doc_info.source_type == "path":
-                master_doc = Document(first_doc_info.source)
-            else:
-                first_doc_info.source.seek(0)
-                master_doc = Document(first_doc_info.source)
-                first_doc_info.source.seek(0)
+            for idx, doc_info in enumerate(documents):
+                self._update_progress(
+                    idx,
+                    len(documents),
+                    f"Cargando: {doc_info.name}..."
+                )
+                
+                try:
+                    if doc_info.source_type == "path":
+                        doc = Document(doc_info.source)
+                    else:
+                        doc_info.source.seek(0)
+                        doc = Document(doc_info.source)
+                        doc_info.source.seek(0)
+                    
+                    loaded_docs.append((doc_info, doc))
+                    
+                    # Actualizar estadísticas
+                    self.stats['total_paragraphs'] += len([p for p in doc.paragraphs if p.text.strip()])
+                    self.stats['total_tables'] += len(doc.tables)
+                    
+                except Exception as e:
+                    logger.error(f"Error cargando {doc_info.name}: {e}")
+                    if options.get('stop_on_error', False):
+                        raise
+                    continue
             
-            # Agregar portada si está habilitado
+            if not loaded_docs:
+                raise ValueError("No se pudieron cargar documentos válidos")
+            
+            # El primer documento es la base
+            first_doc_info, master_doc = loaded_docs[0]
+            
+            # Agregar portada si está habilitado (ANTES de crear el compositor)
             if options.get('add_cover_page', False):
                 self._add_cover_page(master_doc, options)
                 if options.get('add_page_break', True):
                     master_doc.add_page_break()
             
-            # Crear el compositor (motor profesional de docxcompose)
+            # Crear el compositor con el documento maestro
             composer = Composer(master_doc)
             
-            # Procesar documentos restantes
-            for idx, doc_info in enumerate(documents[1:], start=2):
+            # Procesar documentos restantes (desde el segundo en adelante)
+            for idx, (doc_info, source_doc) in enumerate(loaded_docs[1:], start=2):
                 self._update_progress(
                     idx - 1,
                     len(documents),
-                    f"Procesando: {doc_info.name}..."
+                    f"Combinando: {doc_info.name}..."
                 )
                 
                 try:
-                    if doc_info.source_type == "path":
-                        source_doc = Document(doc_info.source)
-                    else:
-                        doc_info.source.seek(0)
-                        source_doc = Document(doc_info.source)
-                        doc_info.source.seek(0)
-                    
-                    # Usar composer.append() - método profesional que evita páginas en blanco
-                    # docxcompose maneja automáticamente:
-                    # - Preservación de estilos
-                    # - Evitar páginas en blanco innecesarias
-                    # - Manejo correcto de secciones
-                    
-                    if options.get('add_page_break', False) and idx > 1:
-                        # Agregar salto de página antes del documento
-                        # docxcompose lo maneja mejor que agregar manualmente
+                    # Si está habilitado el salto de página, cada documento va en nueva página
+                    if options.get('add_page_break', False):
+                        # Agregar documento completo en nueva página
                         composer.append(source_doc, break_type='page')
                     else:
-                        # Combinar sin salto de página explícito
+                        # Agregar documento completo sin salto de página
                         composer.append(source_doc)
                     
-                    # Actualizar estadísticas
-                    self.stats['total_paragraphs'] += len([p for p in source_doc.paragraphs if p.text.strip()])
-                    self.stats['total_tables'] += len(source_doc.tables)
-                    
                 except Exception as e:
-                    logger.error(f"Error procesando {doc_info.name}: {e}")
+                    logger.error(f"Error combinando {doc_info.name}: {e}")
                     if options.get('stop_on_error', False):
                         raise
                     continue
             
-            # Agregar índice si está habilitado
+            # Agregar índice si está habilitado (después de combinar todos)
             if options.get('add_table_of_contents', False):
-                self._add_table_of_contents(master_doc, documents)
-            
-            # Guardar en memoria usando el compositor
-            self._update_progress(len(documents), len(documents), "Guardando documento final...")
-            output = BytesIO()
-            composer.save(output)
-            output.seek(0)
-            result_bytes = output.read()
+                # Necesitamos agregar el índice al documento final
+                # Guardamos temporalmente, agregamos índice, y volvemos a guardar
+                temp_output = BytesIO()
+                composer.save(temp_output)
+                temp_output.seek(0)
+                
+                # Cargar el documento combinado
+                final_doc = Document(temp_output)
+                self._add_table_of_contents(final_doc, documents)
+                
+                # Guardar el documento final con índice
+                output = BytesIO()
+                final_doc.save(output)
+                output.seek(0)
+                result_bytes = output.read()
+            else:
+                # Guardar en memoria usando el compositor
+                self._update_progress(len(documents), len(documents), "Guardando documento final...")
+                output = BytesIO()
+                composer.save(output)
+                output.seek(0)
+                result_bytes = output.read()
             
             # Calcular tiempo de procesamiento
             end_time = datetime.now()
