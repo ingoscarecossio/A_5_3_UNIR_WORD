@@ -1,6 +1,9 @@
 """
 Aplicación Streamlit Profesional para Combinar Documentos Word
-Versión: 2.0 - Nivel Productivo
+Versión: 2.1 - Nivel Productivo Mejorado
+- Eliminación inteligente de páginas en blanco
+- Lógica robusta de combinación de documentos
+- Preservación avanzada de formato sin elementos innecesarios
 """
 
 import os
@@ -179,7 +182,7 @@ class DocumentInfo:
             self._analyzed = True
 
 class DocumentMerger:
-    """Clase profesional para combinar documentos Word"""
+    """Clase profesional para combinar documentos Word con lógica robusta"""
     
     def __init__(self, progress_callback=None):
         self.progress_callback = progress_callback
@@ -196,22 +199,89 @@ class DocumentMerger:
         if self.progress_callback:
             self.progress_callback(current, total, message)
     
-    def _copy_styles(self, source_doc: Document, target_doc: Document):
-        """Copia estilos del documento fuente al documento objetivo"""
-        try:
-            source_styles = source_doc.styles
-            target_styles = target_doc.styles
+    def _has_real_content(self, doc: Document) -> bool:
+        """Verifica si el documento tiene contenido real (no solo párrafos vacíos)"""
+        if len(doc.paragraphs) == 0 and len(doc.tables) == 0:
+            return False
+        
+        # Verificar si hay párrafos con texto real
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if text:  # Si hay texto, hay contenido
+                return True
+        
+        # Verificar si hay tablas
+        if len(doc.tables) > 0:
+            return True
+        
+        return False
+    
+    def _get_last_meaningful_element(self, doc: Document):
+        """Obtiene el último elemento con contenido real del documento"""
+        # Buscar desde el final hacia atrás
+        for element in reversed(doc.element.body):
+            # Verificar si es un párrafo con contenido
+            if element.tag.endswith('p'):
+                para = element
+                text = ''.join(node.text for node in para.iter() if node.text)
+                if text.strip():
+                    return element
+            # Si es una tabla, es contenido
+            elif element.tag.endswith('tbl'):
+                return element
+        return None
+    
+    def _clean_empty_paragraphs_at_end(self, doc: Document):
+        """Elimina párrafos vacíos al final del documento de forma robusta"""
+        if len(doc.paragraphs) == 0:
+            return
+        
+        # Buscar párrafos vacíos al final y eliminarlos
+        removed = True
+        while removed and len(doc.paragraphs) > 0:
+            removed = False
+            last_para = doc.paragraphs[-1]
+            text = last_para.text.strip()
             
-            for style in source_styles:
-                if style.name not in [s.name for s in target_styles]:
+            # Verificar si tiene saltos de página o formato especial
+            has_special_formatting = False
+            for run in last_para.runs:
+                # Verificar saltos de página
+                if run._element.xpath('.//w:br[@w:type="page"]'):
+                    has_special_formatting = True
+                    break
+                # Verificar si tiene formato (bold, italic, etc.) sin texto
+                if run.bold or run.italic or run.underline:
+                    has_special_formatting = True
+                    break
+            
+            # Si el párrafo está completamente vacío y no tiene formato especial, eliminarlo
+            if not text and not has_special_formatting and len(last_para.runs) == 0:
+                try:
+                    p = last_para._element
+                    p.getparent().remove(p)
+                    removed = True
+                except:
+                    break
+            elif not text and not has_special_formatting:
+                # Párrafo con runs pero sin texto, verificar si son solo espacios
+                all_empty = True
+                for run in last_para.runs:
+                    if run.text and run.text.strip():
+                        all_empty = False
+                        break
+                
+                if all_empty:
                     try:
-                        # Intentar copiar el estilo
-                        new_style = target_styles.add_style(style.name, style.type)
-                        # Nota: La copia completa de estilos es compleja, esto es una aproximación
+                        p = last_para._element
+                        p.getparent().remove(p)
+                        removed = True
                     except:
-                        pass  # Si el estilo ya existe o no se puede copiar, continuar
-        except Exception as e:
-            logger.warning(f"Error copiando estilos: {e}")
+                        break
+                else:
+                    break
+            else:
+                break
     
     def _append_document(
         self,
@@ -220,11 +290,45 @@ class DocumentMerger:
         doc_number: int,
         options: Dict
     ):
-        """Agrega un documento al documento maestro con opciones avanzadas"""
+        """Agrega un documento al documento maestro con lógica robusta"""
         
-        # Agregar salto de página si es necesario
-        if options.get('add_page_break', False) and len(master.paragraphs) > 0:
-            master.add_page_break()
+        # Verificar si el documento fuente tiene contenido
+        if not self._has_real_content(source):
+            logger.warning(f"Documento {doc_number} está vacío, se omite")
+            return
+        
+        # Limpiar párrafos vacíos al final del documento maestro antes de agregar
+        self._clean_empty_paragraphs_at_end(master)
+        
+        # Verificar si el documento maestro tiene contenido real
+        master_has_content = self._has_real_content(master)
+        
+        # Agregar salto de página solo si:
+        # 1. Está habilitado en opciones
+        # 2. El documento maestro tiene contenido real
+        # 3. El documento fuente tiene contenido real
+        if options.get('add_page_break', False) and master_has_content:
+            # Agregar salto de página de forma inteligente
+            # Solo si el último elemento no es ya un salto de página
+            last_element = self._get_last_meaningful_element(master)
+            if last_element is not None:
+                # Verificar si el último párrafo ya tiene salto de página
+                last_para = None
+                if len(master.paragraphs) > 0:
+                    last_para = master.paragraphs[-1]
+                    has_existing_break = False
+                    for run in last_para.runs:
+                        if run._element.xpath('.//w:br[@w:type="page"]'):
+                            has_existing_break = True
+                            break
+                    
+                    if not has_existing_break:
+                        master.add_page_break()
+                else:
+                    master.add_page_break()
+            else:
+                # Si no hay contenido previo, no agregar salto
+                pass
         
         # Agregar encabezado de documento si está habilitado
         if options.get('number_documents', False):
@@ -233,7 +337,6 @@ class DocumentMerger:
             header_run.bold = True
             header_run.font.size = Pt(14)
             header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            master.add_paragraph()
         
         # Agregar separador si está habilitado
         if options.get('add_separator', False):
@@ -242,18 +345,53 @@ class DocumentMerger:
             sep_run.font.size = Pt(8)
             sep_run.font.color.rgb = RGBColor(128, 128, 128)
             sep_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            master.add_paragraph()
         
-        # Copiar estilos (intento)
-        if options.get('preserve_styles', True):
-            self._copy_styles(source, master)
+        # Copiar elementos del body de forma inteligente
+        # Filtrar elementos vacíos al inicio del documento fuente
+        source_elements = list(source.element.body)
         
-        # Copiar elementos del body
-        for element in source.element.body:
+        # Saltar párrafos vacíos al inicio del documento fuente
+        start_idx = 0
+        for idx, element in enumerate(source_elements):
+            if element.tag.endswith('p'):
+                text = ''.join(node.text for node in element.iter() if node.text)
+                if text.strip():
+                    start_idx = idx
+                    break
+            elif element.tag.endswith('tbl'):
+                start_idx = idx
+                break
+        
+        # Copiar elementos desde el primer elemento con contenido
+        # Filtrar párrafos vacíos intermedios pero mantener estructura
+        elements_to_add = []
+        for element in source_elements[start_idx:]:
+            if element.tag.endswith('p'):
+                text = ''.join(node.text for node in element.iter() if node.text)
+                # Verificar si tiene saltos de página o formato especial
+                has_break = False
+                for node in element.iter():
+                    if node.tag.endswith('br'):
+                        break_type = node.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type')
+                        if break_type == 'page':
+                            has_break = True
+                            break
+                
+                # Si está vacío pero no es el último y no tiene formato especial, omitirlo
+                if not text.strip() and not has_break and element != source_elements[-1]:
+                    continue
+            
+            elements_to_add.append(element)
+        
+        # Copiar elementos filtrados
+        for element in elements_to_add:
             master.element.body.append(deepcopy(element))
         
+        # Limpiar párrafos vacíos al final después de agregar
+        self._clean_empty_paragraphs_at_end(master)
+        
         # Actualizar estadísticas
-        self.stats['total_paragraphs'] += len(source.paragraphs)
+        self.stats['total_paragraphs'] += len([p for p in source.paragraphs if p.text.strip()])
         self.stats['total_tables'] += len(source.tables)
     
     def merge_documents(
@@ -343,39 +481,57 @@ class DocumentMerger:
             raise
     
     def _add_cover_page(self, doc: Document, options: Dict):
-        """Agrega una portada al documento"""
-        # Agregar salto de página al inicio
-        doc.paragraphs[0].insert_paragraph_before()
+        """Agrega una portada al documento de forma profesional"""
+        # Insertar portada al inicio del documento
+        if len(doc.paragraphs) > 0:
+            # Insertar antes del primer párrafo
+            first_para = doc.paragraphs[0]
+            first_para.insert_paragraph_before()
         
         # Título principal
         title = doc.add_heading(options.get('cover_title', 'Documentos Combinados'), 0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         # Subtítulo
-        subtitle = doc.add_paragraph(options.get('cover_subtitle', f'Generado el {datetime.now().strftime("%d/%m/%Y %H:%M")}'))
-        subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        subtitle.runs[0].font.size = Pt(12)
-        subtitle.runs[0].font.italic = True
+        subtitle_text = options.get('cover_subtitle', '') or f'Generado el {datetime.now().strftime("%d/%m/%Y %H:%M")}'
+        if subtitle_text:
+            subtitle = doc.add_paragraph(subtitle_text)
+            subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            if len(subtitle.runs) > 0:
+                subtitle.runs[0].font.size = Pt(12)
+                subtitle.runs[0].font.italic = True
         
         # Información adicional
         if options.get('cover_info', ''):
             info = doc.add_paragraph(options['cover_info'])
             info.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Salto de página después de la portada
-        doc.add_page_break()
+        # Salto de página después de la portada solo si hay contenido después
+        if self._has_real_content(doc):
+            doc.add_page_break()
     
     def _add_table_of_contents(self, doc: Document, documents: List[DocumentInfo]):
-        """Agrega un índice de contenidos"""
-        doc.add_page_break()
+        """Agrega un índice de contenidos de forma profesional"""
+        # Limpiar párrafos vacíos al final antes de agregar índice
+        self._clean_empty_paragraphs_at_end(doc)
+        
+        # Agregar salto de página solo si hay contenido previo
+        if self._has_real_content(doc):
+            doc.add_page_break()
+        
+        # Título del índice
         toc_heading = doc.add_heading('Índice de Contenidos', 1)
         toc_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
+        # Agregar espacio
         doc.add_paragraph()
         
+        # Lista de documentos
         for idx, doc_info in enumerate(documents, 1):
-            para = doc.add_paragraph(f"{idx}. {doc_info.name}", style='List Number')
+            doc.add_paragraph(f"{idx}. {doc_info.name}", style='List Number')
         
+        # Salto de página después del índice solo si hay contenido después
+        # (aunque normalmente siempre habrá, es mejor verificar)
         doc.add_page_break()
 
 # ============================================================================
@@ -450,7 +606,7 @@ if 'merge_stats' not in st.session_state:
 
 # Título principal
 st.title("📄 Combinador Profesional de Documentos Word")
-st.markdown("**Versión 2.0 - Nivel Productivo** | Combina múltiples documentos Word con preservación avanzada de formato")
+st.markdown("**Versión 2.1 - Nivel Productivo Mejorado** | Combina múltiples documentos Word sin páginas en blanco innecesarias")
 
 # Sidebar con opciones avanzadas
 with st.sidebar:
