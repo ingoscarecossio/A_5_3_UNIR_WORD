@@ -147,30 +147,45 @@ class ProfessionalDocumentMerger:
         if len(doc.paragraphs) > 0:
             doc.paragraphs[0].insert_paragraph_before()
         
-        title = doc.add_heading(options.get('cover_title', 'Documentos Combinados'), 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Usar add_paragraph en lugar de add_heading para evitar problemas con estilos
+        title_para = doc.add_paragraph()
+        title_run = title_para.add_run(options.get('cover_title', 'Documentos Combinados'))
+        title_run.bold = True
+        title_run.font.size = Pt(24)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Agregar espacio
+        doc.add_paragraph()
         
         subtitle_text = options.get('cover_subtitle', '') or f'Generado el {datetime.now().strftime("%d/%m/%Y %H:%M")}'
         if subtitle_text:
-            subtitle = doc.add_paragraph(subtitle_text)
+            subtitle = doc.add_paragraph()
+            subtitle_run = subtitle.add_run(subtitle_text)
+            subtitle_run.font.size = Pt(12)
+            subtitle_run.font.italic = True
             subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            if len(subtitle.runs) > 0:
-                subtitle.runs[0].font.size = Pt(12)
-                subtitle.runs[0].font.italic = True
         
         if options.get('cover_info', ''):
-            info = doc.add_paragraph(options['cover_info'])
+            doc.add_paragraph()  # Espacio
+            info = doc.add_paragraph()
+            info_run = info.add_run(options['cover_info'])
             info.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     def _add_table_of_contents(self, doc: Document, documents: List[DocumentInfo]):
         """Agrega un índice de contenidos"""
         doc.add_page_break()
-        toc_heading = doc.add_heading('Índice de Contenidos', 1)
+        
+        # Usar párrafo en lugar de heading para evitar problemas con estilos
+        toc_heading = doc.add_paragraph()
+        toc_run = toc_heading.add_run('Índice de Contenidos')
+        toc_run.bold = True
+        toc_run.font.size = Pt(18)
         toc_heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph()
         
         for idx, doc_info in enumerate(documents, 1):
-            doc.add_paragraph(f"{idx}. {doc_info.name}", style='List Number')
+            para = doc.add_paragraph()
+            para.add_run(f"{idx}. {doc_info.name}")
     
     def merge_documents(
         self,
